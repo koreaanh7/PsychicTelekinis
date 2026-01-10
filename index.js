@@ -1,14 +1,19 @@
-const { addonBuilder, serveHTTP } = require("stremio-addon-sdk");
+const { addonBuilder } = require("stremio-addon-sdk");
 const axios = require("axios");
+const express = require("express");
+const cors = require("cors");
+const app = express();
 
-// URL bạn cung cấp
+// --- CẤU HÌNH ---
 const TARGET_URL = "https://raw.githubusercontent.com/Sushan64/NetMirror-Extension/refs/heads/builds/Netflix.json";
+const PORT = process.env.PORT || 7000; // Render sẽ tự điền PORT vào đây
 
+// 1. Định nghĩa Addon
 const builder = new addonBuilder({
     id: "org.stremio.netmirror.debug",
-    version: "1.0.0",
-    name: "NetMirror Debugger",
-    description: "Testing CloudStream JSON structure",
+    version: "1.0.1",
+    name: "NetMirror Fix",
+    description: "Debug CloudStream JSON structure",
     resources: ["catalog"],
     types: ["movie", "series"],
     catalogs: [
@@ -20,58 +25,84 @@ const builder = new addonBuilder({
     ]
 });
 
-// Hàm lấy dữ liệu và GHI LOG (Quan trọng để test)
+// 2. Hàm lấy dữ liệu (Giữ nguyên logic cũ)
 async function fetchAndLogData() {
     try {
-        console.log("--> BẮT ĐẦU TẢI DỮ LIỆU TỪ: " + TARGET_URL);
+        console.log("--> Đang tải dữ liệu...");
         const response = await axios.get(TARGET_URL);
-        const data = response.data;
-
-        console.log("--> TRẠNG THÁI: Tải thành công!");
-        console.log("--> KIỂU DỮ LIỆU: " + typeof data);
-        
-        // In ra 500 ký tự đầu tiên của dữ liệu để xem cấu trúc
-        console.log("--> NỘI DUNG DATA (PREVIEW):");
-        console.log(JSON.stringify(data, null, 2).substring(0, 1000)); 
-
-        return data;
+        return response.data;
     } catch (error) {
-        console.error("--> LỖI TẢI DATA: " + error.message);
+        console.error("--> Lỗi tải data: " + error.message);
         return [];
     }
 }
 
+// 3. Xử lý Catalog
 builder.defineCatalogHandler(async ({ type, id }) => {
     const data = await fetchAndLogData();
     let metas = [];
 
-    // [TEST CASE 1]: Kiểm tra xem Data có phải là mảng phim không?
     if (Array.isArray(data)) {
-        console.log("--> KẾT QUẢ TEST: Data là một Mảng (Array). Đang thử map dữ liệu...");
         metas = data.map((item, index) => ({
             id: "nm_" + index,
             type: "movie",
-            name: item.title || item.name || "Unknown Name",
-            description: "Dữ liệu tìm thấy: " + JSON.stringify(item)
+            name: item.title || item.name || "Unknown",
+            description: JSON.stringify(item)
         }));
     } else {
-        // [TEST CASE 2]: Data không phải mảng (Khả năng cao rơi vào đây)
-        console.log("--> KẾT QUẢ TEST: Data KHÔNG phải mảng phim. Nó là Object cấu hình.");
-        
-        // Tạo một item giả để báo lỗi lên màn hình Stremio
+        // Trường hợp lỗi cấu trúc (Dự kiến sẽ rơi vào đây)
         metas = [{
             id: "debug_error",
             type: "movie",
-            name: "LỖI: Cấu trúc không khớp",
-            description: "Dữ liệu tải về không phải danh sách phim. Hãy xem Logs trên Render để biết chi tiết.",
-            poster: "https://via.placeholder.com/300x450?text=DEBUG+ERROR"
+            name: "LỖI CẤU TRÚC JSON",
+            description: "Dữ liệu trả về không phải mảng phim. Hãy xem Logs.",
+            poster: "https://via.placeholder.com/300x450?text=ERROR"
         }];
+        // Ghi log cấu trúc thực tế để debug
+        console.log("--> CẤU TRÚC THỰC TẾ:", JSON.stringify(data, null, 2).substring(0, 500));
     }
 
     return { metas: metas };
 });
 
-// Render cung cấp cổng qua biến môi trường process.env.PORT
-const port = process.env.PORT || 7000;
-serveHTTP(builder.getInterface(), { port: port });
-console.log(`--> Addon đang chạy trên port: ${port}`);
+// --- PHẦN QUAN TRỌNG: FIX LỖI TIMEOUT TRÊN RENDER ---
+
+// Sử dụng Express middleware thay vì serveHTTP mặc định
+app.use(cors());
+
+// Tạo endpoint cho Stremio giao tiếp
+const addonInterface = builder.getInterface();
+app.get("/", (req, res) => {
+    res.redirect("/manifest.json"); // Chuyển hướng về manifest khi mở trang chủ
+});
+
+app.get("/manifest.json", (req, res) => {
+    res.setHeader('Cache-Control', 'max-age=86400'); // Cache 1 ngày
+    res.send(addonInterface.manifest);
+});
+
+// Xử lý các request catalog, stream, meta
+app.get("/:resource/:type/:id/:extra?.json", (req, res, next) => {
+    const { resource, type, id, extra } = req.params;
+    const args = { resource, type, id, extra: extra ? JSON.parse(extra) : {} };
+    
+    addonInterface.handle(args)
+        .then(result => {
+            if (result.redirect) {
+                res.redirect(result.redirect);
+            } else {
+                res.setHeader('Cache-Control', 'max-age=86400'); 
+                res.send(result);
+            }
+        })
+        .catch(err => {
+            console.error(err);
+            res.status(500).send({ error: "Internal Error" });
+        });
+});
+
+// Lắng nghe port và báo cho Render biết ngay lập tức
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`--> Addon đang chạy tại port: ${PORT}`);
+    console.log(`--> Link cài đặt: http://localhost:${PORT}/manifest.json (hoặc URL Render)`);
+});
