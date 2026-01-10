@@ -1,14 +1,15 @@
 {
-  "name": "stremio-cloud-preload",
+  "name": "stremio-pikpak-addon",
   "version": "1.0.0",
-  "description": "Preload torrent to cloud and stream",
+  "description": "Stream from PikPak",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "stremio-addon-sdk": "^1.6.10",
+    "torrent-search-api": "^2.1.4",
     "axios": "^1.6.0",
-    "torrent-search-api": "^2.1.4" 
+    "cinemeta": "^1.1.0"
   }
 }
