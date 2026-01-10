@@ -1,108 +1,71 @@
-const { addonBuilder } = require("stremio-addon-sdk");
-const axios = require("axios");
 const express = require("express");
-const cors = require("cors");
+const WebTorrent = require("webtorrent");
+const { getRouter } = require("stremio-addon-sdk");
+const addonInterface = require("./addon");
+const pump = require("pump");
+const rangeParser = require("range-parser");
+
+const client = new WebTorrent();
 const app = express();
+const port = process.env.PORT || 3000;
 
-// --- CẤU HÌNH ---
-const TARGET_URL = "https://raw.githubusercontent.com/Sushan64/NetMirror-Extension/refs/heads/builds/Netflix.json";
-const PORT = process.env.PORT || 7000; // Render sẽ tự điền PORT vào đây
+// 1. Tích hợp giao diện Stremio Addon
+const addonRouter = getRouter(addonInterface);
+app.use("/", addonRouter);
 
-// 1. Định nghĩa Addon
-const builder = new addonBuilder({
-    id: "org.stremio.netmirror.debug",
-    version: "1.0.1",
-    name: "NetMirror Fix",
-    description: "Debug CloudStream JSON structure",
-    resources: ["catalog"],
-    types: ["movie", "series"],
-    catalogs: [
-        {
-            type: "movie",
-            id: "netmirror_debug",
-            name: "NetMirror Debug"
+// 2. Endpoint xử lý Stream (/stream/:magnet)
+app.get("/stream/:magnet", (req, res) => {
+    const magnetLink = decodeURIComponent(req.params.magnet);
+
+    // Kiểm tra xem torrent đã add chưa, nếu chưa thì add
+    let torrent = client.get(magnetLink);
+    if (!torrent) {
+        torrent = client.add(magnetLink, { path: '/tmp' }); // Lưu tạm vào /tmp
+    }
+
+    // Khi có metadata, tìm file video lớn nhất
+    torrent.on('ready', () => {
+        const file = torrent.files.reduce((a, b) => (a.length > b.length ? a : b));
+        
+        console.log(`Đang tải: ${file.name}`);
+
+        // Xử lý Range Request (Stremio thường yêu cầu tua đi tua lại)
+        const ranges = rangeParser(file.length, req.headers.range || "");
+        
+        if (ranges === -1) return res.sendStatus(416); // Unsatisfiable range
+
+        // Mặc định stream cả file nếu không có range cụ thể
+        let start = 0;
+        let end = file.length - 1;
+
+        if (Array.isArray(ranges)) {
+            start = ranges[0].start;
+            end = ranges[0].end;
+            res.statusCode = 206; // Partial Content
+            res.setHeader("Content-Range", `bytes ${start}-${end}/${file.length}`);
+            res.setHeader("Content-Length", end - start + 1);
+        } else {
+            res.setHeader("Content-Length", file.length);
         }
-    ]
-});
 
-// 2. Hàm lấy dữ liệu (Giữ nguyên logic cũ)
-async function fetchAndLogData() {
-    try {
-        console.log("--> Đang tải dữ liệu...");
-        const response = await axios.get(TARGET_URL);
-        return response.data;
-    } catch (error) {
-        console.error("--> Lỗi tải data: " + error.message);
-        return [];
-    }
-}
+        res.setHeader("Content-Type", "video/mp4"); // Hoặc check đuôi file để set type
+        res.setHeader("Accept-Ranges", "bytes");
 
-// 3. Xử lý Catalog
-builder.defineCatalogHandler(async ({ type, id }) => {
-    const data = await fetchAndLogData();
-    let metas = [];
-
-    if (Array.isArray(data)) {
-        metas = data.map((item, index) => ({
-            id: "nm_" + index,
-            type: "movie",
-            name: item.title || item.name || "Unknown",
-            description: JSON.stringify(item)
-        }));
-    } else {
-        // Trường hợp lỗi cấu trúc (Dự kiến sẽ rơi vào đây)
-        metas = [{
-            id: "debug_error",
-            type: "movie",
-            name: "LỖI CẤU TRÚC JSON",
-            description: "Dữ liệu trả về không phải mảng phim. Hãy xem Logs.",
-            poster: "https://via.placeholder.com/300x450?text=ERROR"
-        }];
-        // Ghi log cấu trúc thực tế để debug
-        console.log("--> CẤU TRÚC THỰC TẾ:", JSON.stringify(data, null, 2).substring(0, 500));
-    }
-
-    return { metas: metas };
-});
-
-// --- PHẦN QUAN TRỌNG: FIX LỖI TIMEOUT TRÊN RENDER ---
-
-// Sử dụng Express middleware thay vì serveHTTP mặc định
-app.use(cors());
-
-// Tạo endpoint cho Stremio giao tiếp
-const addonInterface = builder.getInterface();
-app.get("/", (req, res) => {
-    res.redirect("/manifest.json"); // Chuyển hướng về manifest khi mở trang chủ
-});
-
-app.get("/manifest.json", (req, res) => {
-    res.setHeader('Cache-Control', 'max-age=86400'); // Cache 1 ngày
-    res.send(addonInterface.manifest);
-});
-
-// Xử lý các request catalog, stream, meta
-app.get("/:resource/:type/:id/:extra?.json", (req, res, next) => {
-    const { resource, type, id, extra } = req.params;
-    const args = { resource, type, id, extra: extra ? JSON.parse(extra) : {} };
-    
-    addonInterface.handle(args)
-        .then(result => {
-            if (result.redirect) {
-                res.redirect(result.redirect);
-            } else {
-                res.setHeader('Cache-Control', 'max-age=86400'); 
-                res.send(result);
-            }
-        })
-        .catch(err => {
-            console.error(err);
-            res.status(500).send({ error: "Internal Error" });
+        // Tạo luồng đọc từ file torrent và bơm (pump) vào response
+        const stream = file.createReadStream({ start, end });
+        
+        // Pump giúp tự động đóng stream khi client ngắt kết nối
+        pump(stream, res, (err) => {
+            if (err) console.error("Stream lỗi hoặc client đóng kết nối");
         });
+    });
+
+    torrent.on('error', (err) => {
+        console.error("Lỗi Torrent:", err);
+        res.status(500).send("Lỗi tải torrent");
+    });
 });
 
-// Lắng nghe port và báo cho Render biết ngay lập tức
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`--> Addon đang chạy tại port: ${PORT}`);
-    console.log(`--> Link cài đặt: http://localhost:${PORT}/manifest.json (hoặc URL Render)`);
+app.listen(port, () => {
+    console.log(`Add-on đang chạy tại http://localhost:${port}`);
 });
