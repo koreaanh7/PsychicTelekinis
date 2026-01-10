@@ -1,15 +1,16 @@
 {
-  "name": "stremio-netmirror-debug",
-  "version": "1.0.1",
-  "description": "Debug NetMirror JSON for Stremio",
-  "main": "index.js",
+  "name": "stremio-torrent-proxy",
+  "version": "1.0.0",
+  "description": "Stream torrent via HTTP proxy",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "stremio-addon-sdk": "^1.6.10",
-    "axios": "^1.6.0",
     "express": "^4.18.2",
-    "cors": "^2.8.5"
+    "stremio-addon-sdk": "^1.6.10",
+    "webtorrent": "^2.0.24",
+    "pump": "^3.0.0",
+    "range-parser": "^1.2.1"
   }
 }
