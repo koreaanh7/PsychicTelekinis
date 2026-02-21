@@ -7,7 +7,6 @@ puppeteer.use(StealthPlugin());
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Tự tạo hàm chờ (delay) thay thế cho page.waitForTimeout đã bị xóa
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 app.get('/extract', async (req, res) => {
@@ -24,42 +23,60 @@ app.get('/extract', async (req, res) => {
                 '--disable-dev-shm-usage',
                 '--single-process',
                 '--autoplay-policy=no-user-gesture-required',
-                '--disable-web-security',
-                '--window-size=1280,720' // Đặt kích thước màn hình chuẩn để click
+                '--window-size=1280,720'
             ]
         });
 
         const page = await browser.newPage();
-        
-        // Đặt Viewport và User-Agent
         await page.setViewport({ width: 1280, height: 720 });
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+
+        // 🔥 TUYỆT CHIÊU: BỊT MẮT ANTI-DEVTOOLS
+        await page.evaluateOnNewDocument(() => {
+            // 1. Vô hiệu hóa lệnh 'debugger' (trò hay dùng nhất để làm treo tab khi mở F12)
+            const originalFunction = window.Function;
+            window.Function = function(...args) {
+                if (args.some(arg => typeof arg === 'string' && arg.includes('debugger'))) {
+                    return function() {}; // Trả về hàm rỗng thay vì làm treo web
+                }
+                return originalFunction.apply(this, args);
+            };
+
+            // 2. Chặn các hàm check Console
+            const noop = () => {};
+            window.console.log = noop;
+            window.console.clear = noop;
+            window.console.dir = noop;
+
+            // 3. Đồng bộ kích thước cửa sổ (chống trò đo chênh lệch kích thước khi bảng F12 bật lên)
+            Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth });
+            Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight });
+        });
 
         let foundM3u8 = null;
 
         await page.setRequestInterception(true);
         page.on('request', request => {
             const url = request.url();
+            // Tóm cổ link nếu nó xuất hiện
             if (url.includes('.m3u8') || url.includes('bTN1OA==')) {
                 foundM3u8 = url;
             }
             request.continue();
         });
 
-        // Đi tới trang web
+        // Đi tới trang phim
         await page.goto(vidUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
 
-        // Mô phỏng người dùng: Đợi 2 giây rồi Click chuột vào giữa màn hình để kích hoạt Video Player
+        // Mô phỏng người dùng click chuột để kích hoạt player
         await delay(2000);
         try {
-            await page.mouse.click(640, 360); // Tọa độ giữa màn hình 1280x720
+            await page.mouse.click(640, 360);
             await delay(1000);
-            await page.mouse.click(640, 360); // Click đúp phòng hờ có quảng cáo popup che mất
-        } catch (e) {
-            console.log("Không click được:", e.message);
-        }
+            await page.mouse.click(640, 360); // Click đúp
+        } catch (e) { }
 
-        // Chờ thêm tối đa 10 giây để xem link m3u8 có văng ra không
+        // Chờ 10 giây xem thuốc lú có tác dụng không
         let waitTime = 0;
         while (!foundM3u8 && waitTime < 10) {
             await delay(1000);
@@ -69,16 +86,12 @@ app.get('/extract', async (req, res) => {
         if (foundM3u8) {
             res.json({ streamUrl: foundM3u8.replace(/\\\//g, '/') });
         } else {
-            // TUYỆT CHIÊU CUỐI: Chụp ảnh màn hình để xem bot đang bị kẹt ở đâu
             const base64Screenshot = await page.screenshot({ encoding: 'base64', fullPage: true });
-            
-            // Trả về một trang HTML hiển thị luôn bức ảnh
             const htmlResponse = `
                 <html>
                     <body style="background-color: #222; color: white; text-align: center; font-family: sans-serif;">
-                        <h2>Bot không tìm thấy link m3u8!</h2>
-                        <p>Dưới đây là hình ảnh thực tế mà Bot đang nhìn thấy (Screenshot):</p>
-                        <img src="data:image/png;base64,${base64Screenshot}" style="border: 2px solid red; max-width: 90%; box-shadow: 0 0 20px rgba(0,0,0,0.5);" />
+                        <h2>Bot vẫn chưa bóc được link!</h2>
+                        <img src="data:image/png;base64,${base64Screenshot}" style="border: 2px solid red; max-width: 90%; margin-top: 20px;" />
                     </body>
                 </html>
             `;
