@@ -31,26 +31,11 @@ app.get('/extract', async (req, res) => {
         await page.setViewport({ width: 1280, height: 720 });
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
-        // 🔥 TUYỆT CHIÊU: BỊT MẮT ANTI-DEVTOOLS
-        await page.evaluateOnNewDocument(() => {
-            // 1. Vô hiệu hóa lệnh 'debugger' (trò hay dùng nhất để làm treo tab khi mở F12)
-            const originalFunction = window.Function;
-            window.Function = function(...args) {
-                if (args.some(arg => typeof arg === 'string' && arg.includes('debugger'))) {
-                    return function() {}; // Trả về hàm rỗng thay vì làm treo web
-                }
-                return originalFunction.apply(this, args);
-            };
-
-            // 2. Chặn các hàm check Console
-            const noop = () => {};
-            window.console.log = noop;
-            window.console.clear = noop;
-            window.console.dir = noop;
-
-            // 3. Đồng bộ kích thước cửa sổ (chống trò đo chênh lệch kích thước khi bảng F12 bật lên)
-            Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth });
-            Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight });
+        // Lắng nghe lỗi từ chính trang web để bắt bệnh
+        page.on('console', msg => {
+            if (msg.type() === 'error') {
+                console.log('🔴 LỖI TỪ TRANG WEB:', msg.text());
+            }
         });
 
         let foundM3u8 = null;
@@ -58,7 +43,6 @@ app.get('/extract', async (req, res) => {
         await page.setRequestInterception(true);
         page.on('request', request => {
             const url = request.url();
-            // Tóm cổ link nếu nó xuất hiện
             if (url.includes('.m3u8') || url.includes('bTN1OA==')) {
                 foundM3u8 = url;
             }
@@ -68,17 +52,20 @@ app.get('/extract', async (req, res) => {
         // Đi tới trang phim
         await page.goto(vidUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
 
-        // Mô phỏng người dùng click chuột để kích hoạt player
-        await delay(2000);
+        // Mô phỏng người dùng: Rê chuột từ từ thay vì click bùp một phát vào giữa
+        await delay(3000); // Đợi nó load cái khung Fetching xong
         try {
+            // Rê chuột lượn lờ vài vòng cho giống người
+            await page.mouse.move(100, 100, { steps: 10 });
+            await delay(500);
+            await page.mouse.move(640, 360, { steps: 10 });
+            await delay(500);
             await page.mouse.click(640, 360);
-            await delay(1000);
-            await page.mouse.click(640, 360); // Click đúp
         } catch (e) { }
 
-        // Chờ 10 giây xem thuốc lú có tác dụng không
+        // Chờ 15 giây để web giải mã (có lúc nó bắt đợi khá lâu)
         let waitTime = 0;
-        while (!foundM3u8 && waitTime < 10) {
+        while (!foundM3u8 && waitTime < 15) {
             await delay(1000);
             waitTime++;
         }
