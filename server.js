@@ -7,6 +7,9 @@ puppeteer.use(StealthPlugin());
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Tự tạo hàm chờ (delay) thay thế cho page.waitForTimeout đã bị xóa
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 app.get('/extract', async (req, res) => {
     const vidUrl = req.query.url;
     if (!vidUrl) return res.status(400).send("Missing URL parameter");
@@ -47,10 +50,10 @@ app.get('/extract', async (req, res) => {
         await page.goto(vidUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
 
         // Mô phỏng người dùng: Đợi 2 giây rồi Click chuột vào giữa màn hình để kích hoạt Video Player
-        await page.waitForTimeout(2000);
+        await delay(2000);
         try {
             await page.mouse.click(640, 360); // Tọa độ giữa màn hình 1280x720
-            await page.waitForTimeout(1000);
+            await delay(1000);
             await page.mouse.click(640, 360); // Click đúp phòng hờ có quảng cáo popup che mất
         } catch (e) {
             console.log("Không click được:", e.message);
@@ -59,7 +62,7 @@ app.get('/extract', async (req, res) => {
         // Chờ thêm tối đa 10 giây để xem link m3u8 có văng ra không
         let waitTime = 0;
         while (!foundM3u8 && waitTime < 10) {
-            await page.waitForTimeout(1000);
+            await delay(1000);
             waitTime++;
         }
 
