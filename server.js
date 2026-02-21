@@ -23,7 +23,11 @@ app.get('/extract', async (req, res) => {
                 '--disable-dev-shm-usage',
                 '--single-process',
                 '--autoplay-policy=no-user-gesture-required',
-                '--window-size=1280,720'
+                '--window-size=1280,720',
+                // Kích hoạt giả lập Card màn hình (GPU) bằng phần mềm
+                '--use-gl=swiftshader',
+                '--ignore-gpu-blocklist',
+                '--disable-web-security'
             ]
         });
 
@@ -31,11 +35,24 @@ app.get('/extract', async (req, res) => {
         await page.setViewport({ width: 1280, height: 720 });
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
-        // Lắng nghe lỗi từ chính trang web để bắt bệnh
-        page.on('console', msg => {
-            if (msg.type() === 'error') {
-                console.log('🔴 LỖI TỪ TRANG WEB:', msg.text());
-            }
+        // 🔥 TUYỆT CHIÊU CUỐI: GIẢ LẬP PHẦN CỨNG & BỘ GIẢI MÃ VIDEO
+        await page.evaluateOnNewDocument(() => {
+            // 1. Xóa dấu vết WebDriver
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            
+            // 2. Giả lập có danh sách Plugin (Bot thường có mảng này rỗng)
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+
+            // 3. Đánh lừa bộ kiểm tra Video Codec (Báo cho web biết máy này hỗ trợ mp4/m3u8)
+            const originalCanPlayType = window.HTMLMediaElement.prototype.canPlayType;
+            window.HTMLMediaElement.prototype.canPlayType = function(type) {
+                if (type && (type.includes('mp4') || type.includes('m3u8') || type.includes('avc1') || type.includes('hls'))) {
+                    return 'probably';
+                }
+                return originalCanPlayType.apply(this, arguments);
+            };
         });
 
         let foundM3u8 = null;
@@ -52,18 +69,18 @@ app.get('/extract', async (req, res) => {
         // Đi tới trang phim
         await page.goto(vidUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
 
-        // Mô phỏng người dùng: Rê chuột từ từ thay vì click bùp một phát vào giữa
-        await delay(3000); // Đợi nó load cái khung Fetching xong
+        // Đợi khung video xuất hiện
+        await delay(3000);
+        
+        // Mô phỏng người dùng click vào giữa
         try {
-            // Rê chuột lượn lờ vài vòng cho giống người
-            await page.mouse.move(100, 100, { steps: 10 });
-            await delay(500);
-            await page.mouse.move(640, 360, { steps: 10 });
-            await delay(500);
-            await page.mouse.click(640, 360);
+            await page.mouse.move(640, 360, { steps: 5 });
+            await page.mouse.click(640, 360, { delay: 100 });
+            await delay(1000);
+            await page.mouse.click(640, 360, { delay: 100 }); 
         } catch (e) { }
 
-        // Chờ 15 giây để web giải mã (có lúc nó bắt đợi khá lâu)
+        // Chờ 15 giây xem phép màu có xảy ra không
         let waitTime = 0;
         while (!foundM3u8 && waitTime < 15) {
             await delay(1000);
@@ -77,7 +94,7 @@ app.get('/extract', async (req, res) => {
             const htmlResponse = `
                 <html>
                     <body style="background-color: #222; color: white; text-align: center; font-family: sans-serif;">
-                        <h2>Bot vẫn chưa bóc được link!</h2>
+                        <h2>Đã fake GPU nhưng vẫn kẹt!</h2>
                         <img src="data:image/png;base64,${base64Screenshot}" style="border: 2px solid red; max-width: 90%; margin-top: 20px;" />
                     </body>
                 </html>
