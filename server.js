@@ -5,14 +5,14 @@ const CryptoJS = require('crypto-js');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Tiện ích: Fake User-Agent để API gốc không chặn
+// Giả dạng trình duyệt thật để không bị 403 Forbidden
 const HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Accept': 'application/json, text/plain, */*'
+    'Referer': 'https://vidsrc.me/',
+    'Accept-Language': 'en-US,en;q=0.9'
 };
 
 app.get('/extract', async (req, res) => {
-    // Nhận trực tiếp ID từ Cloudflare Worker truyền sang thay vì cả cái link dài
     const imdbId = req.query.id; 
     const season = req.query.s || '';
     const episode = req.query.e || '';
@@ -20,76 +20,79 @@ app.get('/extract', async (req, res) => {
     if (!imdbId) return res.status(400).json({ error: "Thiếu IMDB ID" });
 
     try {
-        console.log(`Đang tìm link cho: ${imdbId} - S${season}E${episode}`);
+        console.log(`Đang bẻ khóa: ${imdbId} - S${season}E${episode}`);
 
-        // --- BƯỚC 1: LẤY BẢN ĐỒ MÃ HÓA TỪ MÁY CHỦ GỐC ---
-        // Ghi chú: Ở đây mình ví dụ dùng API cộng đồng vidsrc.me (chung lõi với vidfast)
-        const apiUrl = season && episode 
-            ? `https://vidsrc.me/embed/tv?imdb=${imdbId}&season=${season}&episode=${episode}`
-            : `https://vidsrc.me/embed/movie?imdb=${imdbId}`;
+        // --- BƯỚC 1: VÀO CỬA CHÍNH VIDSRC (Đã sửa URL chuẩn để không bị 404) ---
+        const vidsrcUrl = season && episode 
+            ? `https://vidsrc.me/embed/tv/${imdbId}/${season}/${episode}`
+            : `https://vidsrc.me/embed/movie/${imdbId}`;
 
-        const response = await axios.get(apiUrl, { headers: HEADERS });
-        const html = response.data;
-
-        // Tìm đoạn hash (mã hóa) ẩn trong HTML
-        const hashMatch = html.match(/data-hash="([^"]+)"/i) || html.match(/id="hidden-data"\s+value="([^"]+)"/i);
+        const pageRes = await axios.get(vidsrcUrl, { headers: HEADERS });
         
-        if (!hashMatch) {
-            // Rất nhiều site giấu thẳng link m3u8 đã mã hóa Base64 như bạn thấy lúc nãy
-            // Thử bắt m3u8 base64 ngay trong HTML gốc
-            const base64M3u8 = html.match(/(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?/g);
-            let foundDirect = null;
-            if (base64M3u8) {
-                for (let str of base64M3u8) {
-                    try {
-                        const decoded = Buffer.from(str, 'base64').toString('utf8');
-                        if (decoded.includes('.m3u8')) foundDirect = decoded;
-                    } catch (e) {}
-                }
-            }
-            if (foundDirect) return res.json({ streamUrl: foundDirect });
+        // --- BƯỚC 2: TÌM CỬA TRUNG CHUYỂN (Iframe) ---
+        // Vidsrc sẽ giấu một cái iframe trỏ tới máy chủ phát video
+        const iframeMatch = pageRes.data.match(/id="player_iframe"\s+src="([^"]+)"/i) 
+                         || pageRes.data.match(/iframe\s+src="([^"]+vidsrc[^"]+)"/i);
+                         
+        if (!iframeMatch) return res.status(404).json({ error: "Lớp 1: Không tìm thấy Iframe nhúng" });
 
-            return res.status(404).json({ error: "Không tìm thấy dữ liệu mã hóa trên máy chủ gốc." });
-        }
+        let rcpUrl = iframeMatch[1];
+        if (rcpUrl.startsWith('//')) rcpUrl = 'https:' + rcpUrl;
 
-        const encryptedData = hashMatch[1];
+        // --- BƯỚC 3: VÀO MÁY CHỦ MEGACLOUD VÀ LẤY CỤC MẬT MÃ ---
+        const rcpRes = await axios.get(rcpUrl, { headers: { ...HEADERS, 'Referer': vidsrcUrl } });
+        
+        // Nó có thể chứa thẳng data-hash, hoặc chứa link sang Megacloud
+        let encryptedData = null;
+        const hashMatch = rcpRes.data.match(/data-hash="([^"]+)"/i) || rcpRes.data.match(/id="hidden-data"\s+value="([^"]+)"/i);
 
-        // --- BƯỚC 2: TỰ ĐỘNG CẬP NHẬT CHÌA KHÓA (KEYS) TỪ GITHUB ---
-        // Thuật toán của bọn này đổi chìa khóa liên tục, cộng đồng lưu key cập nhật ở đây:
-        const keyUrl = 'https://raw.githubusercontent.com/theusaf/rabbitstream/master/keys.json';
-        const keysRes = await axios.get(keyUrl);
-        const keys = keysRes.data;
-
-        // --- BƯỚC 3: GIẢI MÃ BẰNG CRYPTO-JS ---
-        // Giống hệt code this.subtle.decrypt mà bạn tìm thấy, nhưng chạy trên server!
-        let decryptedStream = "";
-        try {
-            // Lọc ra key bí mật
-            const secretKey = keys.filter(k => k.name === 'megacloud')[0]?.key || keys[0].key;
-            
-            // Dùng AES giải mã
-            const bytes = CryptoJS.AES.decrypt(encryptedData, secretKey);
-            const decryptedText = bytes.toString(CryptoJS.enc.Utf8);
-            
-            const jsonData = JSON.parse(decryptedText);
-            
-            // Lấy link m3u8 có độ phân giải cao nhất
-            decryptedStream = jsonData.sources[0].file; 
-        } catch (decryptError) {
-            console.log("Giải mã thất bại, có thể server đổi key:", decryptError.message);
-            return res.status(500).json({ error: "Lỗi giải mã AES" });
-        }
-
-        if (decryptedStream) {
-            res.json({ streamUrl: decryptedStream });
+        if (hashMatch) {
+            encryptedData = hashMatch[1];
         } else {
-            res.status(404).json({ error: "Giải mã xong nhưng không thấy link m3u8" });
+            // Tìm link redirect sang megacloud/rabbitstream
+            const megaMatch = rcpRes.data.match(/src="([^"]+(megacloud|rabbitstream)[^"]+)"/i);
+            if (megaMatch) {
+                let megaUrl = megaMatch[1];
+                if (megaUrl.startsWith('//')) megaUrl = 'https:' + megaUrl;
+                
+                const megaRes = await axios.get(megaUrl, { headers: { ...HEADERS, 'Referer': rcpUrl } });
+                const finalHash = megaRes.data.match(/data-hash="([^"]+)"/i) || megaRes.data.match(/id="hidden-data"\s+value="([^"]+)"/i);
+                if (finalHash) encryptedData = finalHash[1];
+            }
+        }
+
+        if (!encryptedData) return res.status(404).json({ error: "Lớp 3: Không bóc được cục mã hóa AES" });
+
+        // --- BƯỚC 4: LẤY CHÌA KHÓA TỪ GITHUB ---
+        const keysRes = await axios.get('https://raw.githubusercontent.com/theusaf/rabbitstream/master/keys.json');
+        const keys = keysRes.data;
+        // Bọn nó thường dùng chung 1 khóa cho toàn hệ thống
+        const secretKey = keys.find(k => k.name === 'megacloud')?.key || keys[0].key;
+
+        // --- BƯỚC 5: MỞ KHÓA BẰNG CRYPTO-JS ---
+        const bytes = CryptoJS.AES.decrypt(encryptedData, secretKey);
+        const decryptedText = bytes.toString(CryptoJS.enc.Utf8);
+        
+        if (!decryptedText) return res.status(500).json({ error: "Mở khóa thất bại, khóa AES có thể đã bị đổi" });
+
+        const jsonData = JSON.parse(decryptedText);
+        
+        // Lấy link video nét nhất
+        const streamUrl = jsonData.sources && jsonData.sources[0] ? jsonData.sources[0].file : null;
+
+        if (streamUrl) {
+            console.log("Thành công! Trả link về cho Stremio.");
+            res.json({ streamUrl: streamUrl });
+        } else {
+            res.status(404).json({ error: "Giải mã xong nhưng file rỗng" });
         }
 
     } catch (e) {
-        console.error("Lỗi:", e.message);
-        res.status(500).json({ error: e.message });
+        // Log lỗi chi tiết nếu axios lại vấp phải 404
+        const errorMsg = e.response ? `HTTP ${e.response.status}` : e.message;
+        console.error("Lỗi Sever:", errorMsg);
+        res.status(500).json({ error: errorMsg });
     }
 });
 
-app.listen(PORT, () => console.log(`🚀 API Giải mã siêu tốc đang chạy ở port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 API Node.js Extractor đang chạy ở port ${PORT}`));
